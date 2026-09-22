@@ -1,0 +1,18 @@
+# Normalise line endings in the repository so that a fresh clone builds
+# identically on every platform and diffs never churn because of CRLF.
+* text=auto eol=lf
+
+# Windows-only artefacts keep their native line endings.
+*.sln text eol=crlf
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary artefacts are never normalised.
+*.png binary
+*.jpg binary
+*.ico binary
+*.lib binary
+*.dll binary
+*.exe binary

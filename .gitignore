@@ -1,0 +1,36 @@
+# Build outputs
+/build/
+/build_tmp/
+/out/
+/_build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+*.a
+*.ninja
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# Local runtime artifacts
+*.log
+*.drainlog
+*.snapshot
+*.snapshot.bak
+/run/
