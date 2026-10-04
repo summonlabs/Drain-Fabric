@@ -1,7 +1,6 @@
 # Drain Fabric
 
-**A vendor-neutral Fabric OS runtime for controlled resource drain.**
-Summon Software Labs, 2026.
+**A vendor-neutral runtime for controlled resource drain.**
 
 Drain Fabric owns one job: moving a network resource from serving to unavailable
 without dropping anything it promised to keep. It closes admission, accounts for
