@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -163,8 +164,13 @@ class WireClient {
   std::uint32_t last_sequence() const noexcept { return sequence_; }
 
  private:
+  // Frames the controller pushed while a call waited for its response, kept
+  // in order for receive(). Bounded so a misbehaving peer cannot grow it.
+  static constexpr std::size_t kMaxPendingFrames = 1024;
+
   FrameStream stream_{};
   JsonValue welcome_{};
+  std::deque<Frame> pending_{};
   std::uint32_t sequence_{0};
   AuthorityId authority_{};
   AuthorityToken session_token_{};

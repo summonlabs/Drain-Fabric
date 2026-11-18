@@ -9,7 +9,7 @@ AgentSession::AgentSession(AgentOptions options, Clock& clock)
 
 Status AgentSession::connect() {
   auto client = WireClient::connect_to(options_.host, options_.port, SessionRole::Agent, options_.node,
-                                       options_.max_frame_bytes, options_.wait_ms);
+                                       options_.max_frame_bytes, options_.reply_wait_ms);
   if (!client.ok()) {
     return client.error();
   }
@@ -28,7 +28,7 @@ Status AgentSession::register_obligations() {
     // The whole session token is presented, not just its identifier, so the
     // controller fences it against the live authority line.
     payload.set("authority", client_.session_token().to_json());
-    auto response = client_.call(MessageType::ObligationAdmit, std::move(payload), options_.wait_ms);
+    auto response = client_.call(MessageType::ObligationAdmit, std::move(payload), options_.reply_wait_ms);
     if (!response.ok()) {
       return response.error();
     }
@@ -38,7 +38,7 @@ Status AgentSession::register_obligations() {
   if (!registered_ids_.empty()) {
     JsonValue reopen = JsonValue::object();
     reopen.set("node", JsonValue(options_.node));
-    auto response = client_.call(MessageType::AdmissionReopen, std::move(reopen), options_.wait_ms);
+    auto response = client_.call(MessageType::AdmissionReopen, std::move(reopen), options_.reply_wait_ms);
     (void)response;
   }
   return ok_status();
@@ -63,7 +63,7 @@ Status AgentSession::handle_evacuation(const Frame& frame) {
     report.set("note", JsonValue("the adjacent runtime reported evacuation failure"));
     JsonValue envelope = JsonValue::object();
     envelope.set("report", std::move(report));
-    auto response = client_.call(MessageType::ObligationReport, std::move(envelope), options_.wait_ms);
+    auto response = client_.call(MessageType::ObligationReport, std::move(envelope), options_.reply_wait_ms);
     if (!response.ok()) {
       return response.error();
     }
@@ -94,7 +94,7 @@ Status AgentSession::handle_evacuation(const Frame& frame) {
     evidence.detail = "agent released the obligation on request from the controller";
     JsonValue envelope = JsonValue::object();
     envelope.set("evidence", evidence.to_json());
-    auto response = client_.call(MessageType::EvidenceReport, std::move(envelope), options_.wait_ms);
+    auto response = client_.call(MessageType::EvidenceReport, std::move(envelope), options_.reply_wait_ms);
     if (!response.ok()) {
       return response.error();
     }
@@ -111,7 +111,7 @@ Status AgentSession::handle_evacuation(const Frame& frame) {
   report.set("note", JsonValue("agent completed the requested release"));
   JsonValue envelope = JsonValue::object();
   envelope.set("report", std::move(report));
-  auto response = client_.call(MessageType::ObligationReport, std::move(envelope), options_.wait_ms);
+  auto response = client_.call(MessageType::ObligationReport, std::move(envelope), options_.reply_wait_ms);
   if (!response.ok()) {
     return response.error();
   }

@@ -1,10 +1,12 @@
 #include "drain/persistence.hpp"
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <system_error>
+#include <thread>
 
 #include "drain/checked.hpp"
 #include "drain/crc32c.hpp"
@@ -198,7 +200,30 @@ Status Persistence::save(const JsonValue& snapshot, IncarnationId incarnation, T
       return fail(ErrorCode::PersistenceIo, "cannot rotate the previous snapshot: " + error.message());
     }
   }
-  std::filesystem::rename(temporary, path_, error);
+  // While a reader has the snapshot open (an inspection, an antivirus or
+  // indexing scan) the replacing rename fails on Windows until the reader
+  // closes the file, so it is retried for a bounded time (about 2 s) before
+  // the fallback below. A directory in the way is not transient.
+  for (int attempt = 0;; ++attempt) {
+    error.clear();
+    std::filesystem::rename(temporary, path_, error);
+    if (!error) {
+      break;
+    }
+#if defined(_WIN32)
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION.
+    std::error_code kind;
+    const bool transient = error.category() == std::system_category() &&
+                           (error.value() == 5 || error.value() == 32 || error.value() == 33) &&
+                           !std::filesystem::is_directory(path_, kind);
+#else
+    const bool transient = false;
+#endif
+    if (!transient || attempt >= 100) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  }
   if (error) {
     // Some platforms cannot replace an existing file with rename.
     std::filesystem::remove(path_, error);

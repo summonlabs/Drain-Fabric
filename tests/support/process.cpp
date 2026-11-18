@@ -250,7 +250,9 @@ bool ChildProcess::wait_for_file(const std::string& path, int budget_ms, int pol
   int waited = 0;
   for (;;) {
     std::ifstream stream(path, std::ios::binary);
-    if (stream) {
+    // Writers create the file before they write it, so an empty file is not
+    // ready yet: reading it then found no port, and the caller connected to 0.
+    if (stream && stream.peek() != std::ifstream::traits_type::eof()) {
       return true;
     }
     if (waited >= budget_ms) {

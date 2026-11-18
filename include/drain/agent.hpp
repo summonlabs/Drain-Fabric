@@ -30,6 +30,11 @@ struct AgentOptions {
   std::vector<Obligation> obligations{};
   std::size_t max_frame_bytes{kMaxFramePayloadBytes};
   int wait_ms{20};
+  /// How long the agent waits for the controller's reply to one of its
+  /// requests. wait_ms is only the idle poll slice: the controller serves its
+  /// listener and each connection in turn, so a reply routinely takes longer
+  /// than one slice.
+  int reply_wait_ms{5000};
   /// When true the agent answers an evacuation request by reporting failure
   /// instead of releasing the obligation. Used by the failure-injection tests.
   bool fail_evacuations{false};

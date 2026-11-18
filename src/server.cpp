@@ -637,6 +637,21 @@ Status ControllerServer::handle_frame(const ConnectionPtr& connection, const Fra
       stopping_.store(true, std::memory_order_release);
       return ok_status();
     }
+    case MessageType::EvacuationResponse:
+    case MessageType::AdmissionReopenResponse:
+      // An adjacent runtime's acknowledgement of a request the controller
+      // pushed (docs/proof-surfaces.md) needs no answer. It was answered with a
+      // failure frame, and the agent's next read took that as a refusal of its
+      // session, so an agent stopped after its first acknowledgement.
+      return ok_status();
+    case MessageType::AdmissionReopen:
+      // An agent reports that admission is open again once it has registered.
+      // The controller keeps no state for it, but the call is answered: the
+      // refusal it drew was read later as a refusal of the session when it
+      // arrived after the call's wait, and the agent stopped before its first
+      // evacuation.
+      return send_frame(connection, MessageType::AdmissionReopenResponse, frame.sequence,
+                        ok_payload());
     default:
       ++rejected_frames_;
       return send_failure(connection, frame.sequence, ErrorCode::ProtocolError,
@@ -709,6 +724,11 @@ Status WireClient::send(MessageType type, JsonValue payload) {
 }
 
 StreamOutcome WireClient::receive(Frame& frame, int wait_ms, std::string& error) {
+  if (!pending_.empty()) {
+    frame = std::move(pending_.front());
+    pending_.pop_front();
+    return StreamOutcome::Frame;
+  }
   return stream_.receive_frame(frame, wait_ms, error);
 }
 
@@ -727,6 +747,13 @@ Result<JsonValue> WireClient::call(MessageType type, JsonValue payload, int wait
                    std::string("no response frame: ") + drain::to_string(outcome) + " " + error);
     }
     if (frame.sequence != wanted) {
+      // A frame the controller pushed while this call waited (an evacuation
+      // request for another obligation) was dropped here, so that obligation
+      // was never evacuated. It is kept for the next receive().
+      if (pending_.size() >= kMaxPendingFrames) {
+        return Error(ErrorCode::ProtocolError, "too many unsolicited frames while waiting for a response");
+      }
+      pending_.push_back(std::move(frame));
       continue;
     }
     if (frame.type == MessageType::Failure) {

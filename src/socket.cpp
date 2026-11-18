@@ -119,8 +119,15 @@ Result<Socket> Socket::listen_on(const std::string& host, std::uint16_t port, st
   }
   Socket socket(handle);
   int reuse = 1;
+#if defined(_WIN32)
+  // SO_REUSEADDR on Windows lets a second socket bind a port that is still
+  // listening; exclusive use makes that second bind fail instead.
+  (void)::setsockopt(handle, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&reuse),
+                     static_cast<int>(sizeof(reuse)));
+#else
   (void)::setsockopt(handle, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&reuse),
                      static_cast<int>(sizeof(reuse)));
+#endif
 
   sockaddr_in endpoint{};
   endpoint.sin_family = AF_INET;

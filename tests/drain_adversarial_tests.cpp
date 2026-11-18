@@ -6,9 +6,11 @@
 // and overflow those inputs and require a clean, typed rejection.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "drain/engine.hpp"
@@ -643,4 +645,37 @@ DRAIN_TEST(adversarial, restore_of_a_foreign_snapshot_is_refused) {
                    drain::ErrorCode::PersistenceCorrupt);
 
   DRAIN_CHECK_OK(other.restore(snapshot, drain::IncarnationId{4}, clock.now()));
+}
+
+DRAIN_TEST(adversarial, a_snapshot_save_waits_for_a_reader_to_close) {
+  const std::string directory = make_temp_directory("adversarial-snapshot-reader");
+  const std::string path = directory + "/state.drainlog";
+  drain::Persistence persistence(path);
+  drain::SystemClock clock;
+  drain::JsonValue first = drain::JsonValue::object();
+  first.set("generation", drain::JsonValue(1));
+  DRAIN_CHECK_OK(persistence.save(first, drain::IncarnationId{1}, clock.now()));
+  drain::JsonValue second = drain::JsonValue::object();
+  second.set("generation", drain::JsonValue(2));
+  bool reader_opened = false;
+  bool saved = false;
+  {
+    // Another tool reading the state (an inspection, a scan) holds the snapshot
+    // open while it is replaced, and closes it shortly after.
+    std::ifstream reader(path, std::ios::binary);
+    reader_opened = reader.is_open();
+    std::thread writer([&persistence, &second, &clock, &saved] {
+      saved = persistence.save(second, drain::IncarnationId{2}, clock.now()).ok();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    reader.close();
+    writer.join();
+  }
+  DRAIN_CHECK(reader_opened);
+  // The replacement waits for the reader instead of failing the save.
+  DRAIN_CHECK(saved);
+  drain::SnapshotInfo info;
+  DRAIN_CHECK(persistence.load(info).ok());
+  DRAIN_CHECK(info.incarnation == drain::IncarnationId{2});
+  DRAIN_CHECK(!info.from_backup);
 }

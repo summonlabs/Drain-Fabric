@@ -515,3 +515,207 @@ DRAIN_TEST(transport, agent_failure_report_blocks_the_drain_deterministically) {
   (void)agent->wait();
   DRAIN_CHECK_OK(server.stop());
 }
+
+DRAIN_TEST(transport, a_second_listener_cannot_take_a_listening_port) {
+  std::uint16_t port = 0;
+  auto first = drain::Socket::listen_on("127.0.0.1", 0, port);
+  DRAIN_CHECK(first.ok());
+  DRAIN_CHECK(port != 0);
+  std::uint16_t second_port = 0;
+  auto second = drain::Socket::listen_on("127.0.0.1", port, second_port);
+  // Two controllers must never share one listening port: the second bind fails.
+  DRAIN_CHECK(!second.ok());
+}
+
+DRAIN_TEST(transport, one_agent_session_serves_several_evacuations) {
+  const std::string directory = make_temp_directory("transport-agent-several");
+  const std::string obligations_file = directory + "/obligations.json";
+  const std::string ready = directory + "/agent-ready.txt";
+  const std::string log = directory + "/agent.log";
+
+  drain::SystemClock clock;
+  drain::DrainPolicy policy = drain::DrainPolicy::defaults();
+  policy.set_admission_fence_settle(std::chrono::seconds(0));
+  policy.set_evidence_freshness(std::chrono::minutes(10));
+  policy.set_default_grace(std::chrono::minutes(10));
+  drain::DrainEngine engine(policy, clock);
+  DRAIN_CHECK_OK(engine.install_incarnation(drain::IncarnationId{1}, clock.now()));
+  auto authority = engine.issue_authority(drain::DomainId{}, std::chrono::hours(1), clock.now());
+  DRAIN_CHECK(authority.ok());
+
+  // Separate failure domains: the policy drains one target per domain at a time.
+  const auto first = target_of("res-remote-a", "dom-remote-a");
+  const auto second = target_of("res-remote-b", "dom-remote-b");
+  DRAIN_CHECK_OK(engine.add_resource(drain::ResourceNode(first, drain::CapacityUnits::from(100)),
+                                     clock.now()));
+  DRAIN_CHECK_OK(engine.add_resource(drain::ResourceNode(second, drain::CapacityUnits::from(100)),
+                                     clock.now()));
+
+  drain::ServerOptions options;
+  options.port = 0;
+  options.accept_wait_ms = 1;
+  options.read_wait_ms = 1;
+  drain::ControllerServer server(engine, options, clock);
+  DRAIN_CHECK_OK(server.start());
+  engine.set_sink(&server);
+
+  // One adjacent runtime holds an obligation on each target, so draining both
+  // sends two evacuation requests to the same agent session.
+  drain::JsonValue obligations = drain::JsonValue::array();
+  obligations.array_ref().push_back(
+      drain::Obligation(drain::ObligationKind::ActiveFlow, holder_of("remote-workload-a"), {first})
+          .to_json());
+  obligations.array_ref().push_back(
+      drain::Obligation(drain::ObligationKind::ActiveFlow, holder_of("remote-workload-b"), {second})
+          .to_json());
+  DRAIN_CHECK(write_text_file(obligations_file, obligations.dump()));
+  remove_file(ready);
+
+  auto agent = ChildProcess::spawn(
+      tool_path("drainagent"),
+      {"--connect", "127.0.0.1:" + std::to_string(server.port()), "--node", "node-remote",
+       "--obligations", obligations_file, "--ready-file", ready, "--exit-after", "2"},
+      "", log);
+  DRAIN_CHECK_MSG(agent.ok(), agent.ok() ? "" : agent.error().message());
+  DRAIN_CHECK_MSG(pump_until_file(server, ready, 20000),
+                  "the agent never registered: " + agent->read_log());
+  DRAIN_CHECK_EQ(engine.obligations().size(), 2u);
+
+  drain::DrainRequest request;
+  request.targets = {first, second};
+  request.reason = "two evacuations through one agent session";
+  request.authority = authority->id();
+  auto set = engine.request_drain_set(request, clock.now());
+  DRAIN_CHECK_MSG(set.ok(), set.ok() ? "" : set.error().message());
+  std::vector<drain::DrainId> drains;
+  if (set.ok()) {
+    drains = engine.drain_set(*set)->members;
+  }
+  DRAIN_CHECK_EQ(drains.size(), 2u);
+
+  const auto settled = [&engine, &drains]() {
+    for (const drain::DrainId id : drains) {
+      const auto record = engine.drain(id);
+      if (!record.has_value() || !drain::is_settled(record->state())) {
+        return false;
+      }
+    }
+    return true;
+  };
+  {
+    // A bounded wait for the drains, not a pass condition: the checks below
+    // require both drains to have finished.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline && !settled()) {
+      DRAIN_CHECK_OK(server.poll_once());
+    }
+  }
+  // Both obligations were evacuated by the one session: the agent neither
+  // stopped on a refused acknowledgement nor lost the second request.
+  for (const drain::DrainId id : drains) {
+    const auto record = engine.drain(id);
+    DRAIN_CHECK(record.has_value());
+    if (record.has_value()) {
+      DRAIN_CHECK_MSG(record->state() == drain::DrainState::Drained,
+                      std::string("drain ended in ") + drain::to_string(record->state()) + "; agent: " +
+                          agent->read_log());
+    }
+  }
+  server.stop();
+  if (agent.ok()) {
+    (void)agent->wait();
+  }
+}
+
+DRAIN_TEST(transport, an_agent_waits_for_a_controller_that_replies_late) {
+  const std::string directory = make_temp_directory("transport-agent-late-reply");
+  const std::string obligations_file = directory + "/obligations.json";
+  const std::string ready = directory + "/agent-ready.txt";
+  const std::string log = directory + "/agent.log";
+
+  drain::SystemClock clock;
+  drain::DrainPolicy policy = drain::DrainPolicy::defaults();
+  policy.set_admission_fence_settle(std::chrono::seconds(0));
+  policy.set_evidence_freshness(std::chrono::minutes(10));
+  policy.set_default_grace(std::chrono::minutes(10));
+  drain::DrainEngine engine(policy, clock);
+  DRAIN_CHECK_OK(engine.install_incarnation(drain::IncarnationId{1}, clock.now()));
+  auto authority = engine.issue_authority(drain::DomainId{}, std::chrono::hours(1), clock.now());
+  DRAIN_CHECK(authority.ok());
+
+  const auto target = target_of("res-late", "dom-late");
+  DRAIN_CHECK_OK(engine.add_resource(drain::ResourceNode(target, drain::CapacityUnits::from(100)),
+                                     clock.now()));
+
+  drain::ServerOptions options;
+  options.port = 0;
+  options.accept_wait_ms = 1;
+  options.read_wait_ms = 1;
+  drain::ControllerServer server(engine, options, clock);
+  DRAIN_CHECK_OK(server.start());
+  engine.set_sink(&server);
+
+  drain::JsonValue obligations = drain::JsonValue::array();
+  obligations.array_ref().push_back(
+      drain::Obligation(drain::ObligationKind::ActiveFlow, holder_of("late-workload"), {target}).to_json());
+  DRAIN_CHECK(write_text_file(obligations_file, obligations.dump()));
+  remove_file(ready);
+
+  auto agent = ChildProcess::spawn(
+      tool_path("drainagent"),
+      {"--connect", "127.0.0.1:" + std::to_string(server.port()), "--node", "node-late",
+       "--obligations", obligations_file, "--ready-file", ready, "--exit-after", "1"},
+      "", log);
+  DRAIN_CHECK_MSG(agent.ok(), agent.ok() ? "" : agent.error().message());
+  DRAIN_CHECK_MSG(pump_until_file(server, ready, 20000),
+                  "the agent never registered: " + agent->read_log());
+
+  drain::DrainRequest request;
+  request.targets = {target};
+  request.reason = "a controller that replies late";
+  request.authority = authority->id();
+  auto set = engine.request_drain_set(request, clock.now());
+  DRAIN_CHECK_MSG(set.ok(), set.ok() ? "" : set.error().message());
+  drain::DrainId drain_id{};
+  if (set.ok()) {
+    drain_id = engine.drain_set(*set)->members.front();
+  }
+  {
+    // A bounded wait for the evacuation request to go out to the agent.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline && engine.stats().evacuation_requests == 0) {
+      DRAIN_CHECK_OK(server.poll_once());
+    }
+  }
+  DRAIN_CHECK(engine.stats().evacuation_requests >= 1);
+
+  // The controller then serves nothing for half a second, many times the
+  // agent's 20 ms poll wait: the agent answers the request at once, and the
+  // replies to its evidence and obligation reports arrive late, not never.
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  {
+    // A bounded wait for the drain, not a pass condition: the check below
+    // requires it to have finished.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (std::chrono::steady_clock::now() < deadline) {
+      DRAIN_CHECK_OK(server.poll_once());
+      const auto record = engine.drain(drain_id);
+      if (record.has_value() && drain::is_settled(record->state())) {
+        break;
+      }
+    }
+  }
+  const auto record = engine.drain(drain_id);
+  DRAIN_CHECK(record.has_value());
+  if (record.has_value()) {
+    // The agent waited for each reply only as long as one 20 ms poll, so the
+    // late reply ended its session and left the drain evacuating.
+    DRAIN_CHECK_MSG(record->state() == drain::DrainState::Drained,
+                    std::string("drain ended in ") + drain::to_string(record->state()) + "; agent: " +
+                        agent->read_log());
+  }
+  DRAIN_CHECK_OK(server.stop());
+  if (agent.ok()) {
+    (void)agent->wait();
+  }
+}

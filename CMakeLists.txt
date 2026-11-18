@@ -48,8 +48,10 @@ endif()
 
 if(DRAINFABRIC_SANITIZE)
   if(MSVC)
-    add_compile_options(/fsanitize=address)
-    add_link_options(/fsanitize=address)
+    # Debug information is required: without it MSVC warns C5072 for every
+    # source, which DRAINFABRIC_WERROR turns into an error.
+    add_compile_options(/fsanitize=address /Zi)
+    add_link_options(/fsanitize=address /INCREMENTAL:NO /DEBUG)
     # The MSVC address sanitizer links against a dynamic runtime that lives next
     # to the compiler. Record its directory so the test environment can find it
     # regardless of the generator (Visual Studio adds it automatically; Ninja
